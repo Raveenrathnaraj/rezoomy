@@ -1,81 +1,80 @@
 import { GoogleGenAI } from "@google/genai";
 import resumeDetails from '@/lib/resumedetails.json'
+import { geminiPrompt, geminiSystemInstruction, gptOssPrompt } from "@/lib/prompts";
 
 const apiKey = process.env.GEMINI_API_KEY ?? '';
 const ai = new GoogleGenAI({ apiKey });
+
 const config = {
     thinkingConfig: {
         thinkingBudget: 0,
     },
     systemInstruction: [
         {
-            text: `
-            You are a AI Job application assistant.
-            You'll get the DOM outerhtml as an input.
-            You need to go through it and get all the input fields that needs to be filled by the user 
-            and have a JSON created with the data of all the fields including xpath so that you can fill the field later on.
-            You will also be given User's data so that you can extract the data needed for filling the forms from it.
-            `,
+            text: geminiSystemInstruction,
         }
     ],
 };
 
-const prompt = `
-The Dom content is given inside dom.html file and the user data is given inside data.json file. Extract the data and return me all the fields and it's value in an JSON array in a structured output format.
-{
-    "id": "demo-message",
-    "type": "textarea",
-    "name": "message",
-    "placeholder": "Enter your message",
-    "label": "Message",
-    "value": "",
-    "xpath": "",
-}                      
-`
-const model = 'gemini-2.5-flash';
+const model = 'gemini-2.5-flash-lite';
 
 export async function POST(request: Request) {
     try {
         const body = await request?.json();
 
-        const fullPrompt = `${prompt}
+        const fullPrompt = `${body?.isLocal ? gptOssPrompt : geminiPrompt}
                     
-                
-                            dom.html file content: '''${body?.domContent ?? ''}'''
+                dom.html file content: '''${body?.domContent ?? ''}'''
 
+                data.json file content: '''${JSON.stringify(resumeDetails) ?? ''}'''
+            `
 
-                            data.json file content: '''${JSON.stringify(resumeDetails) ?? ''}'''
-                            `
+        if (body?.isLocal) {
+            const resp = await fetch('http://localhost:11434/api/generate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    prompt: fullPrompt,
+                    model: "gpt-oss:20b",
+                    stream: false,
+                }),
+            });
+            const data = await resp.json();
+            const match = data.response.match(/```json\s*([\s\S]*?)\s*```/);
+            if (match && match[1]) {
+                try {
+                    const parsedResponse = JSON.parse(match[1]);
+                    return Response.json({ message: 'Successfull', data: parsedResponse, fullPrompt, success: true });
 
-        const contents = [
-            {
-                text: fullPrompt,
-            },
-        ];
-        const response = await ai.models.generateContentStream({
+                } catch (e) {
+                    console.error('Failed to parse JSON:', e);
+                }
+            }
+            return Response.json({ message: 'Fail', data: data, fullPrompt, success: true });
+
+        }
+        const contents = [{ text: fullPrompt }];
+
+        const response = await ai.models.generateContent({
             model,
             config,
             contents,
         });
-        let chunks = [];
-        for await (const chunk of response) {
-            chunks.push(chunk.text);
-        }
 
-        const fullResponse = chunks.join('');
-
-        const match = fullResponse.match(/```json\s*([\s\S]*?)\s*```/);
+        const match = response?.text?.match(/```json\s*([\s\S]*?)\s*```/);
         if (match && match[1]) {
             try {
                 const parsedResponse = JSON.parse(match[1]);
-                return Response.json({ message: 'Successfull', data: parsedResponse, fullPrompt, success: true });
+                return Response.json({ message: 'Successfull', data: parsedResponse, success: true });
 
             } catch (e) {
                 console.error('Failed to parse JSON:', e);
             }
         }
 
-        return Response.json({ message: 'Successfull', data: fullResponse, fullPrompt, success: true });
+        return Response.json({ message: 'Successfull', data: response, success: true });
     } catch (err) {
         console.log(err);
         return Response.json({ message: 'Error', success: false, error: err });
